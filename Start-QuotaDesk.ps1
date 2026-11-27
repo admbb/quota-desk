@@ -43,10 +43,18 @@ if (-not $ready) {
 }
 if (-not $ready) { throw "Quota Desk did not start. See $errorLog; port 4318 may be in use." }
 $lanCode = Join-Path $dataDirectory 'lan-code'
-try { $lanOn = (Get-Content -LiteralPath (Join-Path $dataDirectory 'config.json') -Raw | ConvertFrom-Json).lan -eq $true } catch { $lanOn = $false }
-if ($lanOn -and (Test-Path -LiteralPath $lanCode)) {
+try {
+  $config = Get-Content -LiteralPath (Join-Path $dataDirectory 'config.json') -Raw | ConvertFrom-Json
+  $lanOn = $config.lan -eq $true
+  $needsCode = $config.lanCode -ne $false
+} catch { $lanOn = $false; $needsCode = $true }
+if ($lanOn) {
   # The adapter that has a default gateway is the real LAN; WSL and VM adapters have none.
   $lanIp = (Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -and $_.IPv4Address } | Select-Object -First 1).IPv4Address.IPAddress
-  Write-Output "LAN: http://$($lanIp):4318   Code: $((Get-Content -LiteralPath $lanCode -Raw | ConvertFrom-Json).code)"
+  if ($needsCode -and (Test-Path -LiteralPath $lanCode)) {
+    Write-Output "LAN: http://$($lanIp):4318   Code: $((Get-Content -LiteralPath $lanCode -Raw | ConvertFrom-Json).code)"
+  } else {
+    Write-Output "LAN: http://$($lanIp):4318   No access code (same subnet, read-only)"
+  }
 }
 if (-not $NoBrowser) { Start-Process $address }

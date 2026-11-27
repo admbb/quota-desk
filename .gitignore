@@ -1,5 +1,25 @@
-# Local state: sessions, quotas, labels, project paths, access codes and logs stay on this machine.
+# Local Quota Desk data and runtime output
 data/
-node_modules/
+.quota-desk/
 *.log
+*.pid
+
+# JavaScript and packaging output
+node_modules/
+coverage/
+dist/
 *.tgz
+
+# Local settings and secrets
+.env
+.env.*
+!.env.example
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Preserved local snapshots from before the cleanup
+.local-backups/

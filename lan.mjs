@@ -1,4 +1,5 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { networkInterfaces } from 'node:os';
 
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
@@ -9,6 +10,35 @@ export function isPrivateIPv4(address) {
   const [a, b, c, d] = match.slice(1).map(Number);
   if ([a, b, c, d].some(part => part > 255)) return false;
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+/** Private IPv4 source address, accepting Node's IPv4-mapped IPv6 form. */
+export function isPrivateClient(address) {
+  const value = String(address || '').replace(/^::ffff:/i, '');
+  return isPrivateIPv4(value);
+}
+
+function ipv4Integer(address) {
+  const parts = String(address || '').split('.').map(Number);
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+  return parts.reduce((value, part) => ((value << 8) | part) >>> 0, 0);
+}
+
+function ipv4Number(address) {
+  return isPrivateIPv4(address) ? ipv4Integer(address) : null;
+}
+
+/** Allow a LAN client only when it shares the destination interface's IPv4 subnet. */
+export function isSameSubnetClient(remoteAddress, localAddress, interfaces = networkInterfaces()) {
+  const remote = String(remoteAddress || '').replace(/^::ffff:/i, '');
+  const local = String(localAddress || '').replace(/^::ffff:/i, '');
+  const remoteNumber = ipv4Number(remote), localNumber = ipv4Number(local);
+  if (remoteNumber == null || localNumber == null) return false;
+  const entries = Object.values(interfaces).flat().filter(item => item && (item.family === 'IPv4' || item.family === 4) && item.address === local);
+  return entries.some(item => {
+    const mask = ipv4Integer(item.netmask);
+    return mask != null && (remoteNumber & mask) === (localNumber & mask);
+  });
 }
 
 /** Host header allowed for this port. LAN mode adds private IPv4 literals; never a DNS name. */

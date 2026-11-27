@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir, networkInterfaces } from 'node:os';
 import { request } from 'node:http';
 import { connect } from 'node:net';
-import { isPrivateIPv4, hostAllowed, isLoopback, newAccessCode, codeMatches, createSessions, createLimiter } from './lan.mjs';
+import { isPrivateIPv4, isPrivateClient, isSameSubnetClient, hostAllowed, isLoopback, newAccessCode, codeMatches, createSessions, createLimiter } from './lan.mjs';
 import { initData, saveJSON } from './store.mjs';
 import { createApp } from './server.mjs';
 
@@ -19,6 +19,14 @@ test('only private IPv4 literals are LAN hosts, and only in LAN mode', () => {
   assert.equal(hostAllowed('192.168.1.122:9999', 4318, true), false);
   assert.equal(hostAllowed('attacker.example:4318', 4318, true), false);
   assert.equal(hostAllowed('8.8.8.8:4318', 4318, true), false);
+  assert.equal(isPrivateClient('192.168.1.10'), true);
+  assert.equal(isPrivateClient('::ffff:192.168.1.10'), true);
+  assert.equal(isPrivateClient('8.8.8.8'), false);
+  assert.equal(isPrivateClient('::ffff:8.8.8.8'), false);
+  const interfaces = { lan: [{ family: 'IPv4', address: '192.168.100.158', netmask: '255.255.255.0' }] };
+  assert.equal(isSameSubnetClient('192.168.100.20', '192.168.100.158', interfaces), true);
+  assert.equal(isSameSubnetClient('192.168.101.20', '192.168.100.158', interfaces), false);
+  assert.equal(isSameSubnetClient('8.8.8.8', '192.168.100.158', interfaces), false);
   assert.equal(isLoopback('::ffff:127.0.0.1'), true);
   assert.equal(isLoopback('192.168.1.5'), false);
 });
@@ -64,6 +72,7 @@ test('LAN mode asks a non-loopback client for the code and then lets it in', { s
 
   const post = code => fetch(`${base}/login`, { method: 'POST', redirect: 'manual', headers: { Origin: base, 'Content-Type': 'application/x-www-form-urlencoded' }, body: `code=${code}` });
   assert.equal((await fetch(`${base}/login`, { method: 'POST', redirect: 'manual', headers: { Origin: 'http://evil.example' }, body: 'code=x' })).status, 403);
+  assert.equal((await fetch(`${base}/login`, { method: 'POST', redirect: 'manual', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `code=${app.accessCode}` })).status, 403, 'login requires the matching Origin');
   assert.equal((await post('WRONG-CODE')).status, 401);
   const ok = await post(app.accessCode); assert.equal(ok.status, 303);
   const cookie = ok.headers.get('set-cookie'); assert.match(cookie, /HttpOnly/); assert.match(cookie, /SameSite=Strict/);
@@ -74,6 +83,24 @@ test('LAN mode asks a non-loopback client for the code and then lets it in', { s
   for (const [path, body] of [['record', { agent: 'claude', project: 'p', task: 't', status: 'done' }], ['project', { name: 'p', path: directory }], ['quota', { agent: 'claude', remaining: 5 }], ['label', { id: 'x', task: 't' }]]) assert.equal((await write(path, body)).status, 403, path);
   assert.equal((await write('refresh', {})).status, 200, 'refresh stays available');
   const local = await (await fetch('http://127.0.0.1:49182/api/data')).json(); assert.equal(local.readOnly, false);
+});
+
+test('explicit no-code LAN mode opens reads only to the same subnet and remains read-only', { skip: !lanAddress && 'no private network interface' }, async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'quota-desk-lan-open-')); t.after(() => rmSync(directory, { recursive: true, force: true }));
+  initData(join(directory, 'data'));
+  saveJSON(join(directory, 'data/config.json'), { projects: [], nativeSessions: false, lanCode: false, codexExe: join(directory, 'missing-codex'), agyExe: join(directory, 'missing-agy') });
+  const app = createApp({ dataDir: join(directory, 'data'), port: 49198, lan: true });
+  await new Promise(resolve => app.server.listen(49198, '0.0.0.0', resolve));
+  t.after(() => new Promise(resolve => { app.server.close(resolve); app.server.closeAllConnections(); }));
+  const base = `http://${lanAddress}:49198`;
+  assert.equal(app.accessCode, null);
+  assert.equal((await fetch(base)).status, 200, 'dashboard opens without a login page');
+  const data = await (await fetch(`${base}/api/data`)).json();
+  assert.equal(data.readOnly, true);
+  assert.ok(data.csrf);
+  const write = await fetch(`${base}/api/record`, { method: 'POST', headers: { Origin: base, 'X-Quota-Desk-Token': data.csrf, 'Content-Type': 'application/json' }, body: JSON.stringify({ agent: 'claude', project: 'p', task: 't', status: 'done' }) });
+  assert.equal(write.status, 403, 'no-code LAN clients remain read-only');
+  assert.equal((await (await fetch('http://127.0.0.1:49198/api/data')).json()).readOnly, false);
 });
 
 test('without LAN mode a private-IP Host is refused', async t => {
@@ -109,11 +136,15 @@ test('a local client still needs the Origin and the per-process token to write',
   const app = createApp({ dataDir: join(directory, 'data'), port: 49195 });
   await new Promise(resolve => app.server.listen(49195, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => { app.server.close(resolve); app.server.closeAllConnections(); }));
+  const localData = await (await fetch('http://127.0.0.1:49195/api/data')).json();
   const body = JSON.stringify({ agent: 'qwen', project: 'p', task: 't', status: 'done' });
   const post = headers => fetch('http://127.0.0.1:49195/api/record', { method: 'POST', headers, body });
   assert.equal((await post({})).status, 403, 'no origin, no token');
+  assert.equal((await post({ 'X-Quota-Desk-Token': localData.csrf })).status, 403, 'a valid token without Origin is still refused');
   assert.equal((await post({ Origin: app.origin })).status, 403, 'no token');
   assert.equal((await post({ Origin: app.origin, 'X-Quota-Desk-Token': 'wrong' })).status, 403, 'wrong token');
+  assert.equal((await post({ Origin: 'null', 'X-Quota-Desk-Token': localData.csrf })).status, 403, 'opaque Origin is refused');
+  assert.equal((await post({ Origin: app.origin, 'X-Quota-Desk-Token': localData.csrf })).status, 200, 'same-origin request with token is allowed');
 });
 
 test('a malformed request target from an unauthenticated network client gets a 400 and does not stop the server', { skip: !lanAddress && 'no private network interface' }, async t => {

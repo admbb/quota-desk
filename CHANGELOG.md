@@ -2,6 +2,21 @@
 
 All notable changes. Format based on [Keep a Changelog](https://keepachangelog.com/); versions follow [SemVer](https://semver.org/).
 
+## [0.2.0] - 2026-11-27
+
+### Added
+
+- Multi-account local readers for WorkBuddy and Antigravity Manager, plus per-account ChatGPT usage from Codex Switcher.
+- GitHub Copilot quota summaries and Windows Credential Manager support.
+- A responsive four-provider dashboard and a bundled high-resolution WorkBuddy icon.
+- Optional subnet-restricted LAN access with read-only network clients and configurable access-code login.
+- Cross-platform CI and complete npm package file declarations for the new collectors.
+
+### Security
+
+- Account identifiers are pseudonymized before they enter dashboard snapshots; refresh tokens are not used.
+- LAN clients must come from the destination interface subnet and cannot write local records or settings.
+
 ## [0.1.2] - 2026-11-03
 
 ### Security

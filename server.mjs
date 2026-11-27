@@ -3,9 +3,10 @@ import { readFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash, randomBytes } from 'node:crypto';
-import { hostAllowed, isLoopback, newAccessCode, codeMatches, createSessions, createLimiter, loginPage } from './lan.mjs';
+import { hostAllowed, isLoopback, isSameSubnetClient, newAccessCode, codeMatches, createSessions, createLimiter, loginPage } from './lan.mjs';
 import { initData, readJSON, saveJSON, filesJSON, agents, validateRecord, normalizeQuota, clean } from './store.mjs';
 import { fetchQuotas, collectRelay, collectNative, collectQwen, projectName } from './collectors.mjs';
+import { retainGoodAccounts } from './project-quotas.mjs';
 import { dataDirectory, localFolder } from './paths.mjs';
 
 const publicDirectory = join(dirname(fileURLToPath(import.meta.url)), 'public');
@@ -15,18 +16,91 @@ const defaultExecutable = (windowsPath, name) => {
   return candidate && existsSync(candidate) ? candidate : name;
 };
 
+const ZH_LABEL = [
+  [/·\s*(\d+)\s*days?\b/gi, '· $1 天'],
+  [/·\s*(\d+)\s*hours?\b/gi, '· $1 小时'],
+  [/·\s*(\d+)\s*minutes?\b/gi, '· $1 分钟'],
+  [/\bweekly\b/gi, '每周'],
+  [/Claude\s+and\s+GPT\s+models?/gi, 'Claude/GPT'],
+  [/Gemini\s+models?/gi, 'Gemini'],
+  [/\bcodex\b/gi, 'Codex'],
+];
+
+function zhLabel(label, agent) {
+  let text = String(label || '');
+  for (const [pattern, replacement] of ZH_LABEL) text = text.replace(pattern, replacement);
+  if (agent === 'codex') text = text.replace(/^Codex\s*·\s*/, '');
+  return text.trim();
+}
+
+/** Local "HH:MM", or "M/D HH:MM" for another day; null when the stamp is a placeholder. */
+function zhStamp(iso) {
+  const time = Date.parse(iso);
+  if (!Number.isFinite(time)) return null;
+  const date = new Date(time);
+  if (date.getFullYear() < 2000) return null;
+  const pad = value => String(value).padStart(2, '0');
+  const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return date.toDateString() === new Date().toDateString() ? clock : `${date.getMonth() + 1}/${date.getDate()} ${clock}`;
+}
+
+/** Plain-text digest for clients that cannot parse JSON (iOS Shortcuts, curl, widgets). */
+export function summaryText(snapshot) {
+  const names = { workbuddy: 'WorkBuddy', codex: 'ChatGPT / Codex', agy: 'Antigravity', github: 'GitHub Copilot' };
+  const byAgent = new Map((snapshot.quotas || []).map(quota => [quota.agent, quota]));
+  const lines = [];
+  for (const id of ['workbuddy', 'codex', 'agy', 'github']) {
+    lines.push(names[id]);
+    const quota = byAgent.get(id);
+    if (Array.isArray(quota?.accounts)) {
+      if (!quota.accounts.length) lines.push('  · 暂无账号');
+      for (const account of quota.accounts) {
+        const plan = account.plan ? ` · ${account.plan}` : '';
+        lines.push(`  ${account.label || '账号'}${plan} · ${account.status || '额度未知'}`);
+        for (const bucket of account.buckets || []) {
+          const remaining = typeof bucket.remaining === 'number' ? bucket.remaining : NaN;
+          const percent = Number.isFinite(remaining) ? `${Math.round(remaining * 10) / 10}%` : '未知';
+          const notes = [bucket.note, bucket.resetsAt && zhStamp(bucket.resetsAt) ? `${zhStamp(bucket.resetsAt)} 重置` : null].filter(Boolean);
+          lines.push(`    · ${zhLabel(bucket.label, id)}  ${percent}${notes.length ? `（${notes.join('，')}）` : ''}`);
+        }
+      }
+      lines.push('');
+      continue;
+    }
+    const buckets = quota && Array.isArray(quota.buckets) ? quota.buckets : [];
+    if (!buckets.length) {
+      lines.push('  · 暂无数据');
+    } else {
+      for (const bucket of buckets) {
+        const remaining = typeof bucket.remaining === 'number' ? bucket.remaining : NaN;
+        const percent = bucket.unlimited ? '不限量' : Number.isFinite(remaining) ? `${Math.round(remaining * 10) / 10}%` : '未知';
+        const notes = [bucket.unlimited ? null : bucket.note, bucket.resetsAt && zhStamp(bucket.resetsAt) ? `${zhStamp(bucket.resetsAt)} 重置` : null].filter(Boolean);
+        lines.push(`  · ${zhLabel(bucket.label, id)}  ${percent}${notes.length ? `（${notes.join('，')}）` : ''}`);
+      }
+      const read = zhStamp(quota.checkedAt);
+      if (read) lines.push(`  更新于 ${read}`);
+    }
+    lines.push('');
+  }
+  const warnings = (snapshot.warnings || []).filter(Boolean);
+  if (warnings.length) lines.push(`注意：${warnings.join('；')}`);
+  return `${lines.join('\n').trim()}\n`;
+}
+
 export function createApp({ dataDir = dataDirectory(), port = 4318, lan: lanOption } = {}) {
   const data = dataDir; initData(data);
   const configPath = join(data, 'config.json');
   let config = readJSON(configPath, { projects: [], nativeSessions: true,
-    codexExe: defaultExecutable('Programs/OpenAI/Codex/bin/codex.exe', 'codex'), agyExe: defaultExecutable('agy/bin/agy.exe', 'agy') });
+    codexExe: defaultExecutable('Programs/OpenAI/Codex/bin/codex.exe', 'codex'), agyExe: defaultExecutable('agy/bin/agy.exe', 'agy'),
+    workbuddyDir: '', codexSwitcherDir: '', antigravityManagerDir: '', codexSwitcherLive: true });
   const origin = `http://127.0.0.1:${port}`, nonce = randomBytes(24).toString('hex');
   // LAN mode is opt-in ("lan": true in config.json). Off, the panel is loopback-only.
   const lan = lanOption ?? config.lan === true;
+  const requireCode = lan && config.lanCode !== false;
   const sessions = createSessions(), limiter = createLimiter();
   const codePath = join(data, 'lan-code');
   let accessCode = null;
-  if (lan) {
+  if (requireCode) {
     accessCode = readJSON(codePath, null)?.code;
     if (!accessCode) { accessCode = newAccessCode(); saveJSON(codePath, { code: accessCode }); }
   }
@@ -63,7 +137,11 @@ export function createApp({ dataDir = dataDirectory(), port = 4318, lan: lanOpti
     refreshed = (async () => {
       const results = await fetchQuotas(config); errors = [];
       for (const result of results) {
-        if (result.quota) saveJSON(join(data, 'quotas', `${result.quota.agent}.json`), result.quota);
+        if (result.quota) {
+          const path = join(data, 'quotas', `${result.quota.agent}.json`);
+          const previous = readJSON(path);
+          saveJSON(path, retainGoodAccounts(previous, result.quota));
+        }
         else errors.push(`${agents[result.agent]}: ${result.error} The last reading, if any, is kept.`);
       }
       snapshot = null;
@@ -75,9 +153,12 @@ export function createApp({ dataDir = dataDirectory(), port = 4318, lan: lanOpti
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer'); res.setHeader('Cache-Control', 'no-store');
     const json = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value)); };
+    if (lan && !isLoopback(req.socket.remoteAddress) && !isSameSubnetClient(req.socket.remoteAddress, req.socket.localAddress)) {
+      req.resume(); return json(403, { error: 'LAN clients must share the destination interface subnet.' });
+    }
     if (!hostAllowed(req.headers.host, port, lan)) return json(403, { error: 'Host not allowed.' });
     const pageOrigin = `http://${req.headers.host}`;
-    if (lan && !isLoopback(req.socket.remoteAddress) && !sessions.valid(req.headers.cookie)) {
+    if (lan && requireCode && !isLoopback(req.socket.remoteAddress) && !sessions.valid(req.headers.cookie)) {
       const page = (status, message = '', headers = {}) => {
         res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'");
         res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', ...headers }); res.end(loginPage(message));
@@ -85,7 +166,12 @@ export function createApp({ dataDir = dataDirectory(), port = 4318, lan: lanOpti
       let path; try { path = new URL(req.url, pageOrigin).pathname; } catch { req.resume(); return json(400, { error: 'Bad request.' }); }
       const from = req.socket.remoteAddress;
       if (req.method === 'POST' && path === '/login') {
-        if (req.headers.origin !== pageOrigin) return json(403, { error: 'Request not allowed.' });
+        const loginOrigin = req.headers.origin;
+        if (loginOrigin !== pageOrigin) {
+          console.log(`[login-refused] origin=${JSON.stringify(loginOrigin)} from=${from} ua=${req.headers['user-agent'] || '-'}`);
+          req.resume();
+          return json(403, { error: 'Request not allowed.' });
+        }
         if (limiter.blocked(from)) return page(429, 'Too many attempts. Wait a minute.');
         // A client that drops the connection mid-body rejects this loop; it must not reach the process.
         let text = ''; try { for await (const chunk of req) { text += chunk.toString(); if (text.length > 512) return json(413, { error: 'Request too large.' }); } } catch { return; }
@@ -103,12 +189,23 @@ export function createApp({ dataDir = dataDirectory(), port = 4318, lan: lanOpti
     try {
       const path = new URL(req.url, origin).pathname;
       if (req.method === 'GET' && path === '/api/data') return json(200, { ...await snapshotData(), readOnly });
+      if (req.method === 'GET' && path === '/api/summary') {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end(summaryText(await snapshotData()));
+      }
       if (req.method === 'GET' && path === '/api/export') {
         const value = await snapshotData(); res.setHeader('Content-Disposition', 'attachment; filename="quota-desk-export.json"');
         return json(200, { generatedAt: value.generatedAt, records: value.records, quotas: value.quotas });
       }
       if (req.method === 'POST' && path.startsWith('/api/')) {
-        if (req.headers.origin !== pageOrigin || req.headers['x-quota-desk-token'] !== nonce) return json(403, { error: 'Request not allowed.' });
+        const postOrigin = req.headers.origin;
+        const originOk = postOrigin === pageOrigin;
+        const tokenOk = req.headers['x-quota-desk-token'] === nonce;
+        if (!originOk || !tokenOk) {
+          console.log(`[csrf-refused] ${path} origin=${JSON.stringify(postOrigin)} token=${tokenOk} from=${req.socket.remoteAddress} ua=${req.headers['user-agent'] || '-'}`);
+          req.resume();
+          return json(403, { error: 'Request not allowed.' });
+        }
         if (readOnly && path !== '/api/refresh') return json(403, { error: 'Read-only over the network. Make changes on this computer.' });
         let text = ''; for await (const chunk of req) { text += chunk.toString(); if (text.length > 16000) return json(413, { error: 'Request too large.' }); }
         const input = JSON.parse(text || '{}');
@@ -134,9 +231,9 @@ export function createApp({ dataDir = dataDirectory(), port = 4318, lan: lanOpti
         } else return json(404, { error: 'Unknown action.' });
         snapshot = null; return json(200, { ok: true });
       }
-      const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'] };
+      const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'], '/workbuddy.png': ['workbuddy.png', 'image/png'] };
       if (req.method !== 'GET' || !files[path]) return json(404, { error: 'Not found.' });
-      const [file, type] = files[path]; res.writeHead(200, { 'Content-Type': `${type}; charset=utf-8` }); res.end(readFileSync(join(publicDirectory, file)));
+      const [file, type] = files[path]; res.writeHead(200, { 'Content-Type': type.startsWith('image/') ? type : `${type}; charset=utf-8` }); res.end(readFileSync(join(publicDirectory, file)));
     } catch (error) { json(400, { error: clean(error.message) }); }
   });
   server.on('close', () => clearInterval(interval));

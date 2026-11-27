@@ -1,7 +1,7 @@
 {
   "name": "quota-desk",
-  "version": "0.1.2",
-  "description": "A local dashboard for your AI coding agents: quotas for Codex, Claude Code and Antigravity, recent sessions and token counts, and a work log, all read on your own machine.",
+  "version": "0.2.0",
+  "description": "A local-first dashboard for multi-account AI quotas, coding sessions, token usage, and work tracking.",
   "keywords": [
     "ai",
     "ai-agents",
@@ -19,13 +19,13 @@
     "developer-tools",
     "local-first"
   ],
-  "homepage": "https://github.com/isanchez-aguilar/quota-desk#readme",
+  "homepage": "https://github.com/admbb/quota-desk#readme",
   "bugs": {
-    "url": "https://github.com/isanchez-aguilar/quota-desk/issues"
+    "url": "https://github.com/admbb/quota-desk/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/isanchez-aguilar/quota-desk.git"
+    "url": "git+https://github.com/admbb/quota-desk.git"
   },
   "license": "Apache-2.0",
   "author": {
@@ -41,8 +41,11 @@
     "public/",
     "capture.mjs",
     "collectors.mjs",
+    "copilot.mjs",
+    "copilot-cred.py",
     "lan.mjs",
     "paths.mjs",
+    "project-quotas.mjs",
     "record.mjs",
     "server.mjs",
     "store.mjs",
@@ -57,7 +60,7 @@
   "scripts": {
     "start": "node bin/quota-desk.mjs",
     "test": "node --test",
-    "check": "node --check server.mjs && node --check collectors.mjs && node --check lan.mjs && node --check paths.mjs && node --check bin/quota-desk.mjs && node --check public/app.js",
+    "check": "node --check server.mjs && node --check collectors.mjs && node --check copilot.mjs && node --check project-quotas.mjs && node --check lan.mjs && node --check paths.mjs && node --check store.mjs && node --check record.mjs && node --check capture.mjs && node --check bin/quota-desk.mjs && node --check public/app.js",
     "prepublishOnly": "node --test"
   }
 }

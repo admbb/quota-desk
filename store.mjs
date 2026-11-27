@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-export const agents = { claude: 'Claude Code', codex: 'Codex', agy: 'Antigravity', jules: 'Jules', chatgpt: 'ChatGPT · manual', qwen: 'Qwen (local)' };
+export const agents = { claude: 'Claude Code', workbuddy: 'WorkBuddy', codex: 'ChatGPT / Codex', agy: 'Antigravity', github: 'GitHub Copilot', jules: 'Jules', chatgpt: 'ChatGPT · manual', qwen: 'Qwen (local)' };
 export const readJSON = (path, fallback = null) => { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return fallback; } };
 export function saveJSON(path, data) {
   const temporary = `${path}.${randomUUID()}.tmp`;

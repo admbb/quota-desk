@@ -1,13 +1,14 @@
 # Quota Desk
 
 A local dashboard for your AI coding agents. It shows how much quota you have
-left on Codex, Claude Code and Antigravity, the recent sessions of each agent
-with their token counts, and a log of who worked on what, all read from files
-and official commands on your own machine.
+left across your WorkBuddy, ChatGPT/Codex Switcher and Antigravity Manager accounts, plus GitHub Copilot and Claude Code status-line readings, recent sessions of each agent
+with their token counts, and a log of who worked on what. It reads local files,
+uses official local commands, and makes a fixed ChatGPT usage request for
+Codex Switcher accounts.
 
 ![Quota Desk overview with quota cards, activity stats and recent work (synthetic data)](docs/screenshot.png)
 
-- **No dependencies, no accounts, no telemetry.** Node 22.13+ and a browser.
+- **No Node dependencies, no Quota Desk account, no telemetry.** Node 22.13+ and a browser. GitHub Copilot live readings on Windows optionally use Python 3.10+ to read the current user's Windows Credential Manager.
 - **Read-only towards your agents.** It never starts a conversation, logs in or
   spends credits. From session logs it keeps usage and titles plus a short,
   redacted excerpt of the first request, never full prompts or transcripts.
@@ -16,24 +17,18 @@ and official commands on your own machine.
 
 ## Install
 
-```bash
-npm install --global quota-desk
-quota-desk
-```
-
-Then open `http://127.0.0.1:4318`. Stop it with Ctrl+C.
-
-From a checkout instead:
+Download the ZIP from GitHub or clone this repository, then run it with Node 22.13 or newer:
 
 ```bash
-git clone https://github.com/isanchez-aguilar/quota-desk.git
+git clone https://github.com/admbb/quota-desk.git
 cd quota-desk
 npm start
 ```
 
-On Windows, `Start-QuotaDesk.ps1` starts the server hidden in the background and
-opens the browser (`-NoBrowser` to skip that); `Stop-QuotaDesk.ps1` stops it
-after checking that the recorded PID really is this server.
+Open `http://127.0.0.1:4318`. On Windows, you can instead run
+`Start-QuotaDesk.ps1`, which starts the server hidden and opens the dashboard;
+pass `-NoBrowser` to skip opening the browser. Run `Stop-QuotaDesk.ps1` to stop
+the background server after it verifies the recorded process ID.
 
 ```text
 quota-desk [--port <n>]       Start the panel (default port 4318)
@@ -47,17 +42,26 @@ quota-desk --version | --help
 
 | Source | How | What is kept |
 |---|---|---|
-| Codex quota | `codex app-server`, method `account/rateLimits/read` only, with your existing login | 5-hour and 7-day windows, reset times, extra resets if reported |
-| Antigravity quota | `agy -p /usage` in plan mode; the response must show zero turns and zero tokens | Each group's shared windows (they are not per-model credits) |
+| WorkBuddy accounts | `~/.wb-switch/accounts.json` and `credit_usage_snapshots.json`, read-only | Pseudonymous account labels, cached credits and source times; no token is used |
+| ChatGPT/Codex Switcher accounts | `~/.codex-switcher/accounts.json`; a fixed HTTPS GET to `chatgpt.com/backend-api/wham/usage` per ChatGPT OAuth account | Plan, 5-hour/weekly rate-limit windows and reset times; labels are pseudonymous; refresh tokens are never used |
+| Antigravity Manager accounts | `~/.antigravity_tools/accounts.json` and `accounts/<id>.json`, read-only | Gemini and Claude/GPT 5-hour and weekly quota windows from local cache; missing readings stay unknown |
+| GitHub Copilot | Windows Credential Manager token or Copilot's local cache; fixed HTTPS GET to `api.github.com/copilot_internal/user` | Product quota snapshots and reset date; no credential is saved to disk |
+| Active Codex quota | `codex app-server`, method `account/rateLimits/read` only, when no Codex Switcher store is available | 5-hour and 7-day windows, reset times, extra resets if reported |
+| Active Antigravity quota | `agy -p /usage` in plan mode; the response must show zero turns and zero tokens, when no account cache is available | Each group's shared windows (they are not per-model credits) |
 | Claude Code quota | The official status-line JSON, through `quota-desk capture` | 5-hour and 7-day `rate_limits`, if your plan reports them |
 | Claude Code and Codex sessions | The 80 most recent JSONL logs in `~/.claude/projects` and `~/.codex/sessions` (files over 64 MiB are skipped) | Session id, title, a first-request excerpt (max 240 characters, credential patterns redacted, code blocks removed), model, branch, timestamp, token total |
 | Qwen through OpenCode | `~/.local/share/opencode/opencode.db`, opened read-only | Token counts for a provider named `local` with a Qwen model; never message content |
 | Relay runs | `.ai/runs/*` in the projects you add and their Git worktrees, as written by [Relayrace AI](https://github.com/isanchez-aguilar/relayrace-ai) | Task, hand-off summary, status, provider, model and tokens per turn |
-| Jules and ChatGPT | Manual readings you type in | What you entered, marked as such |
+| Jules and manual ChatGPT quota | Readings you type in | Manual entries remain separate from the Codex Switcher account readings |
 
 Quotas are re-read when the page opens and every five minutes, at most once a
 minute. Session tokens and account quotas are separate things: tokens are never
-converted into credits or a bill. A finished session is not a finished task, and
+converted into credits or a bill. Codex Switcher access tokens are used only in
+memory for the fixed ChatGPT usage request; refresh tokens are never used, and
+failed or expired accounts are left for the original app to repair. WorkBuddy
+and Antigravity account rows show local snapshots, which may be stale. GitHub
+Copilot credentials are only read on Windows from the current user's credential
+store and are used in memory for the fixed GitHub quota request. A finished session is not a finished task, and
 an agent saying "done" never overrides the relay's own review status. Unknown
 values stay unknown instead of being guessed.
 
@@ -123,7 +127,12 @@ it when you upgrade. Do not put keys in it.
   "nativeSessions": true,
   "codexExe": "codex",
   "agyExe": "agy",
-  "lan": false
+  "workbuddyDir": "",
+  "codexSwitcherDir": "",
+  "antigravityManagerDir": "",
+  "codexSwitcherLive": true,
+  "lan": false,
+  "lanCode": true
 }
 ```
 
@@ -132,7 +141,15 @@ it when you upgrade. Do not put keys in it.
 | `projects` | Folders whose relay runs are read. `path` must be an absolute local path (network shares are refused). `cwd` is optional and used by Relayrace. Add projects from the panel or edit the file. |
 | `nativeSessions` | `false` stops reading Claude Code, Codex and OpenCode logs. |
 | `codexExe`, `agyExe` | Executables for the quota queries. Defaults: the Windows install location under `%LOCALAPPDATA%` if present, else `codex` and `agy` on `PATH`. |
+| `workbuddyDir`, `codexSwitcherDir`, `antigravityManagerDir` | Optional source directories; blank uses each project's default folder under your user profile. |
+| `codexSwitcherLive` | `false` disables ChatGPT usage requests. The account count and plan remain visible where available. |
 | `lan` | `true` turns on [LAN mode](#lan-mode-opt-in). |
+| `lanCode` | `false` skips the LAN login code. Any reachable device in the same IPv4 subnet can then view the read-only dashboard. |
+
+The Codex Switcher usage endpoint is an internal ChatGPT endpoint and may change
+or refuse requests. Quota Desk does not follow redirects, retry with a refresh
+token, or modify the Switcher account store. A `401` means to refresh the login
+in Codex Switcher; a `403` may be a service-side or anti-bot refusal.
 
 Restart the server after editing the file by hand.
 
@@ -180,18 +197,19 @@ and restart. Then:
 
 - The server listens on all interfaces and accepts only a `Host` that is a
   private IPv4 address (10.x, 172.16–31.x, 192.168.x) with port 4318. DNS names
-  are refused, which blocks DNS rebinding.
-- Every other device must enter an access code (`XXXX-XXXX`). It is generated
-  once and stored in `lan-code` in the data folder; on Windows,
-  `Start-QuotaDesk.ps1` prints it with the LAN address. The browser stays signed
-  in for 30 days or until the server restarts. Five wrong codes per minute lock
-  that address out for the rest of the minute.
+  are refused, which blocks DNS rebinding. The client must also be in the same
+  IPv4 subnet as the destination interface.
+- By default, every other device must enter an access code (`XXXX-XXXX`). It is
+  generated once and stored in `lan-code` in the data folder; on Windows,
+  `Start-QuotaDesk.ps1` prints it with the LAN address. Set `"lanCode": false`
+  to skip login; any reachable device in that subnet can then view the dashboard.
 - **Other devices are read-only.** They can view, export and refresh quotas, but
   not add records, notes, projects or manual quotas. Make changes on the computer
   itself.
-- **It is plain HTTP.** The code and the session cookie travel unencrypted, so
-  anyone who can watch the network can capture them. Use it only on a network you
-  control, never on public or shared Wi-Fi. When in doubt, use the SSH tunnel.
+- **It is plain HTTP.** With the code enabled, the code and session cookie travel
+  unencrypted. With the code disabled, all devices on the same subnet can read
+  the dashboard. Use it only on a network you control, never on public or shared
+  Wi-Fi. When in doubt, use the SSH tunnel.
 - Allow inbound TCP 4318 on private networks only. On Windows:
   `New-NetFirewallRule -DisplayName "Quota Desk" -Direction Inbound -Protocol TCP -LocalPort 4318 -Profile Private -Action Allow`.
 

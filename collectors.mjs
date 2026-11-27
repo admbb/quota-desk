@@ -6,6 +6,8 @@ import { createInterface } from 'node:readline';
 import { createReadStream } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { readJSON, clean, finite, codexQuota, agyQuota } from './store.mjs';
+import { copilotQuota } from './copilot.mjs';
+import { fetchProjectQuotas } from './project-quotas.mjs';
 import { localFolder } from './paths.mjs';
 
 export function rpcRead(exe, method, params = {}) {
@@ -44,12 +46,16 @@ export function rpcRead(exe, method, params = {}) {
   });
 }
 export async function fetchQuotas(config) {
+  const project = await fetchProjectQuotas(config);
+  const projectByAgent = new Map(project.quotas.map(quota => [quota.agent, quota]));
   const outcomes = await Promise.allSettled([
-    rpcRead(config.codexExe, 'account/rateLimits/read').then(codexQuota),
-    new Promise((resolveResult, reject) => {
+    projectByAgent.has('codex') ? Promise.resolve(null) : rpcRead(config.codexExe, 'account/rateLimits/read').then(codexQuota),
+    projectByAgent.has('agy') ? Promise.resolve(null) : new Promise((resolveResult, reject) => {
       const child = spawn(config.agyExe, ['-p', '/usage', '--sandbox', '--mode', 'plan', '--output-format', 'json', '--print-timeout', '20s'], { windowsHide: true });
       let output = '', overflow = false;
-      const timer = setTimeout(() => { child.kill(); reject(new Error('Antigravity timed out.')); }, 25000);
+      // Antigravity regularly takes 25–40s here (it boots its sandbox before answering), so the
+      // guard is well above the observed worst case instead of the 25s that kept killing it.
+      const timer = setTimeout(() => { child.kill(); reject(new Error('Antigravity timed out.')); }, 60000);
       child.on('error', error => { clearTimeout(timer); reject(error); });
       child.stdout.on('data', chunk => { output += chunk.toString(); if (output.length > 1024 * 1024) { overflow = true; child.kill(); } });
       child.stderr.on('data', () => {});
@@ -61,8 +67,17 @@ export async function fetchQuotas(config) {
         } catch (error) { reject(error); }
       });
     }),
+    // GitHub Copilot: token from the Windows credential store, numbers from copilot_internal/user.
+    copilotQuota(config),
   ]);
-  return outcomes.map((result, i) => result.status === 'fulfilled' ? { quota: result.value } : { agent: i === 0 ? 'codex' : 'agy', error: clean(result.reason.message) });
+  const ids = ['codex', 'agy', 'github'];
+  return [
+    ...project.quotas.map(quota => ({ quota })),
+    ...project.errors.map(error => ({ agent: error.startsWith('workbuddy') ? 'workbuddy' : error.startsWith('agy') ? 'agy' : 'codex', error })),
+    ...outcomes.map((result, i) => result.status === 'fulfilled'
+      ? result.value ? { quota: result.value } : null
+      : { agent: ids[i], error: clean(result.reason.message) }),
+  ].filter(Boolean);
 }
 
 export function projectName(cwd, projects) {
