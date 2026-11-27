@@ -30,6 +30,12 @@ Open `http://127.0.0.1:4318`. On Windows, you can instead run
 pass `-NoBrowser` to skip opening the browser. Run `Stop-QuotaDesk.ps1` to stop
 the background server after it verifies the recorded process ID.
 
+To start Quota Desk automatically when your Windows account signs in, run
+`Set-QuotaDesk-Autostart.ps1`. It creates a per-user Task Scheduler entry, starts
+the server hidden without opening a browser, and does not require administrator
+rights. Remove the entry with `Set-QuotaDesk-Autostart.ps1 -Disable`; this leaves
+an already running dashboard untouched.
+
 ```text
 quota-desk [--port <n>]       Start the panel (default port 4318)
 quota-desk record <file.json> Add a work record

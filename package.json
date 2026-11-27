@@ -48,6 +48,9 @@
     "project-quotas.mjs",
     "record.mjs",
     "server.mjs",
+    "Start-QuotaDesk.ps1",
+    "Stop-QuotaDesk.ps1",
+    "Set-QuotaDesk-Autostart.ps1",
     "store.mjs",
     "NOTICE"
   ],
